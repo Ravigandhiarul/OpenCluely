@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Get-AudioDevice -List\")",
+      "Bash(powershell -Command \"Get-PnpDevice -Class ''AudioEndpoint'' -Status ''OK'' | Select-Object FriendlyName\")",
+      "Bash(taskkill:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(timeout /t 2)",
+      "Bash(npm install:*)",
+      "Bash(npm start)",
+      "Bash(where:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

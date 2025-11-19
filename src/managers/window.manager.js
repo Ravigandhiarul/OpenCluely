@@ -160,7 +160,12 @@ class WindowManager {
     }
     const window = await this.createWindow('chat');
     this.windows.set('chat', window);
-    window.hide();
+
+    // Enable DevTools for debugging chat window issues
+    window.webContents.openDevTools({ mode: 'detach' });
+
+    // Show chat window by default so user can interact with microphone/text
+    this.showOnCurrentDesktop(window);
     return window;
   }
 
@@ -200,6 +205,7 @@ class WindowManager {
         contextIsolation: true,
         backgroundThrottling: false,
         devTools: true, // Enable DevTools for debugging
+        cache: false, // Disable cache to always load latest HTML/JS
       },
       show: false, // Never show during creation, use showOnCurrentDesktop instead
       title: windowConfig.title,
@@ -347,9 +353,11 @@ class WindowManager {
     browserWindowOptions.simpleFullscreen = false;
 
   const window = new BrowserWindow(browserWindowOptions);
-    
-  // Load the HTML file
-    await window.loadFile(windowConfig.file);
+
+  // Load the HTML file with cache-busting query parameter
+    await window.loadFile(windowConfig.file, {
+      query: { 't': Date.now().toString() }
+    });
     
   // Position the window
     this.positionWindow(window, type);
@@ -805,6 +813,11 @@ class WindowManager {
   }
 
   setupScreenSharingDetection() {
+    // Temporarily disabled - causing "Source is not capturable" errors on Windows
+    // TODO: Fix Windows screen capture permissions and re-enable
+    logger.info('Screen sharing detection temporarily disabled');
+    return;
+
     // Avoid screencast portal errors on Linux/Wayland by disabling periodic detection
     if (process.platform === 'linux') {
       logger.info('Skipping screen sharing detection on Linux to avoid portal screencast errors');

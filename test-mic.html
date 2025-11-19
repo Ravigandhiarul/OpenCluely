@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Microphone Test</title>
+</head>
+<body>
+    <h1>Microphone Permission Test</h1>
+    <button id="testBtn">Test Microphone Access</button>
+    <div id="result"></div>
+    <div id="devices"></div>
+
+    <script>
+        const testBtn = document.getElementById('testBtn');
+        const result = document.getElementById('result');
+        const devices = document.getElementById('devices');
+
+        testBtn.addEventListener('click', async () => {
+            result.innerHTML = 'Testing microphone access...';
+
+            try {
+                // Request microphone permission
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                result.innerHTML = '<p style="color: green;">✅ Microphone access GRANTED!</p>';
+
+                // List audio devices
+                const deviceList = await navigator.mediaDevices.enumerateDevices();
+                const audioInputs = deviceList.filter(device => device.kind === 'audioinput');
+
+                devices.innerHTML = '<h2>Available Microphones:</h2><ul>';
+                audioInputs.forEach((device, index) => {
+                    devices.innerHTML += `<li>${index + 1}. ${device.label || 'Microphone ' + (index + 1)} (${device.deviceId.substring(0, 20)}...)</li>`;
+                });
+                devices.innerHTML += '</ul>';
+
+                // Stop the stream
+                stream.getTracks().forEach(track => track.stop());
+
+            } catch (error) {
+                result.innerHTML = `<p style="color: red;">❌ Microphone access DENIED or ERROR: ${error.message}</p>`;
+            }
+        });
+    </script>
+</body>
+</html>

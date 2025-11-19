@@ -8,6 +8,7 @@ const config = require("./src/core/config");
 // Screen capture (image-based)
 const captureService = require("./src/services/capture.service");
 const speechService = require("./src/services/speech.service");
+const dualSpeechService = require("./src/services/dual-speech.service");
 const llmService = require("./src/services/llm.service");
 
 // Managers
@@ -129,13 +130,25 @@ class ApplicationController {
   }
 
   setupPermissions() {
+    // Handle permission requests (user prompts)
     session.defaultSession.setPermissionRequestHandler(
       (webContents, permission, callback) => {
-        const allowedPermissions = ["microphone", "camera", "display-capture"];
+        const allowedPermissions = ["microphone", "camera", "display-capture", "media", "audioCapture"];
         const granted = allowedPermissions.includes(permission);
 
         logger.debug("Permission request", { permission, granted });
         callback(granted);
+      }
+    );
+
+    // Handle permission checks (automatic checks without user prompt)
+    session.defaultSession.setPermissionCheckHandler(
+      (webContents, permission, requestingOrigin, details) => {
+        const allowedPermissions = ["microphone", "camera", "display-capture", "media", "audioCapture"];
+        const granted = allowedPermissions.includes(permission);
+
+        logger.debug("Permission check", { permission, granted, origin: requestingOrigin });
+        return granted;
       }
     );
   }
@@ -229,6 +242,65 @@ class ApplicationController {
         window.webContents.send("speech-error", { error, available: this.speechAvailable });
       });
     });
+
+    // Dual Speech Service Event Handlers
+    dualSpeechService.on("recording-started", () => {
+      BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("dual-recording-started");
+      });
+    });
+
+    dualSpeechService.on("recording-stopped", () => {
+      BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("dual-recording-stopped");
+      });
+    });
+
+    dualSpeechService.on("transcription", (data) => {
+      // data contains: { source: 'user' | 'other', text: string, isFinal: boolean, speaker: string }
+
+      // Add to session memory with speaker label
+      if (data.isFinal) {
+        sessionManager.addUserInput(`[${data.speaker}] ${data.text}`, 'speech');
+      }
+
+      BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("dual-transcription-received", data);
+      });
+
+      // Process with LLM if final transcription
+      if (data.isFinal) {
+        setTimeout(async () => {
+          try {
+            const sessionHistory = sessionManager.getOptimizedHistory();
+            await this.processTranscriptionWithLLM(data.text, sessionHistory);
+          } catch (error) {
+            logger.error("Failed to process dual transcription with LLM", {
+              error: error.message,
+              source: data.source
+            });
+          }
+        }, 500);
+      }
+    });
+
+    dualSpeechService.on("interim-transcription", (data) => {
+      BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("dual-interim-transcription", data);
+      });
+    });
+
+    dualSpeechService.on("status", (status) => {
+      BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("dual-speech-status", { status });
+      });
+    });
+
+    dualSpeechService.on("error", (error) => {
+      BrowserWindow.getAllWindows().forEach((window) => {
+        window.webContents.send("dual-speech-error", { error });
+      });
+    });
   }
 
   setupIPCHandlers() {
@@ -269,6 +341,91 @@ class ApplicationController {
 
     ipcMain.on("stop-speech-recognition", () => {
       speechService.stopRecording();
+    });
+
+    // Dual speech recognition handlers
+    ipcMain.handle("get-dual-speech-availability", () => {
+      return dualSpeechService.isAvailable();
+    });
+
+    ipcMain.handle("start-dual-speech-recognition", async () => {
+      await dualSpeechService.startDualRecording();
+      return dualSpeechService.getStatus();
+    });
+
+    ipcMain.handle("stop-dual-speech-recognition", async () => {
+      await dualSpeechService.stopDualRecording();
+      return dualSpeechService.getStatus();
+    });
+
+    // Whisper API transcription
+    ipcMain.handle("transcribe-audio-whisper", async (event, audioBuffer) => {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const FormData = require('form-data');
+        const fetch = require('node-fetch');
+
+        // Save buffer to temporary file
+        const tempDir = require('os').tmpdir();
+
+        // Detect format from buffer header
+        let extension = 'webm';
+        if (audioBuffer.length > 12) {
+          // Check for MP4/M4A (starts with ftyp)
+          if (audioBuffer.toString('utf8', 4, 8) === 'ftyp') {
+            extension = 'm4a';
+          }
+          // Check for MPEG (starts with ID3 or 0xFF 0xFB)
+          else if (audioBuffer.toString('utf8', 0, 3) === 'ID3' ||
+                   (audioBuffer[0] === 0xFF && (audioBuffer[1] & 0xE0) === 0xE0)) {
+            extension = 'mp3';
+          }
+        }
+
+        const tempFile = path.join(tempDir, `audio-${Date.now()}.${extension}`);
+        fs.writeFileSync(tempFile, audioBuffer);
+        logger.info('Saved audio file', { tempFile, size: audioBuffer.length, extension });
+
+        // Create form data for Whisper API
+        const formData = new FormData();
+        formData.append('file', fs.createReadStream(tempFile));
+        formData.append('model', 'whisper-1');
+        formData.append('language', 'en');
+        // Note: prompt removed as it causes hallucination when audio is unclear
+        formData.append('temperature', '0');  // Lower temperature for more accurate transcription
+
+        // Call OpenAI Whisper API
+        const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+            ...formData.getHeaders()
+          },
+          body: formData
+        });
+
+        // Clean up temp file
+        fs.unlinkSync(tempFile);
+
+        if (!response.ok) {
+          throw new Error(`Whisper API error: ${response.statusText}`);
+        }
+
+        const result = await response.json();
+        logger.info('Whisper API transcription successful', {
+          textLength: result.text?.length || 0,
+          transcription: result.text
+        });
+
+        return result;
+
+      } catch (error) {
+        logger.error('Whisper API transcription failed', {
+          error: error.message
+        });
+        throw error;
+      }
     });
 
     ipcMain.on("chat-window-ready", () => {

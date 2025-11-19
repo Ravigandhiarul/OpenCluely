@@ -39,17 +39,15 @@ class ConfigManager {
       },
 
       llm: {
-        gemini: {
-          model: 'gemini-2.5-flash',
+        openai: {
+          model: 'gpt-4o-mini',
           maxRetries: 3,
           timeout: 60000,
           fallbackEnabled: true,
-          enableFallbackMethod: true,
           generation: {
             temperature: 0.7,
-            topK: 32,
-            topP: 0.9,
-            maxOutputTokens: 4096
+            top_p: 0.9,
+            max_tokens: 4096
           }
         }
       },

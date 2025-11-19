@@ -10,7 +10,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startSpeechRecognition: () => ipcRenderer.invoke('start-speech-recognition'),
   stopSpeechRecognition: () => ipcRenderer.invoke('stop-speech-recognition'),
   getSpeechAvailability: () => ipcRenderer.invoke('get-speech-availability'),
-  
+
+  // Dual speech recognition (microphone + system audio)
+  startDualSpeechRecognition: () => ipcRenderer.invoke('start-dual-speech-recognition'),
+  stopDualSpeechRecognition: () => ipcRenderer.invoke('stop-dual-speech-recognition'),
+  getDualSpeechAvailability: () => ipcRenderer.invoke('get-dual-speech-recognition'),
+
+  // Whisper API transcription
+  transcribeAudioWithWhisper: async (audioBlob) => {
+    // Convert blob to buffer
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    return ipcRenderer.invoke('transcribe-audio-whisper', buffer);
+  },
+
   // Window management
   showAllWindows: () => ipcRenderer.invoke('show-all-windows'),
   hideAllWindows: () => ipcRenderer.invoke('hide-all-windows'),
@@ -95,7 +108,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onRecordingStarted: (callback) => ipcRenderer.on('recording-started', callback),
   onRecordingStopped: (callback) => ipcRenderer.on('recording-stopped', callback),
   onCodingLanguageChanged: (callback) => ipcRenderer.on('coding-language-changed', callback),
-  
+
+  // Dual speech event listeners
+  onDualRecordingStarted: (callback) => ipcRenderer.on('dual-recording-started', callback),
+  onDualRecordingStopped: (callback) => ipcRenderer.on('dual-recording-stopped', callback),
+  onDualTranscriptionReceived: (callback) => ipcRenderer.on('dual-transcription-received', callback),
+  onDualInterimTranscription: (callback) => ipcRenderer.on('dual-interim-transcription', callback),
+  onDualSpeechStatus: (callback) => ipcRenderer.on('dual-speech-status', callback),
+  onDualSpeechError: (callback) => ipcRenderer.on('dual-speech-error', callback),
+
   // Generic receive method
   receive: (channel, callback) => ipcRenderer.on(channel, callback),
   

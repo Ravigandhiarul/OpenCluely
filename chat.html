@@ -695,11 +695,11 @@
             id="messageInput"
             rows="1"
           ></textarea>
-          <button class="mic-button" id="micButton">
-            <i class="fas fa-microphone"></i>
+          <button class="mic-button" id="micButton" title="Start recording audio (microphone + system)" style="min-width:60px;padding:8px 12px;font-size:12px;font-weight:bold;">
+            MIC
           </button>
-          <button class="send-button" id="sendButton">
-            <i class="fas fa-paper-plane"></i>
+          <button class="send-button" id="sendButton" title="Send message" style="min-width:60px;padding:8px 12px;font-size:12px;font-weight:bold;">
+            SEND
           </button>
         </div>
       </div>
@@ -732,6 +732,17 @@
       let listeningStartTime = null;
       let listeningTimer = null;
       let speechAvailable = false;
+
+      // Audio recording for Whisper API
+      let mediaRecorder = null;
+      let audioChunks = [];
+      let recordingStream = null;
+      let isRecordingAudio = false;
+      let recordingStartTime = null;
+
+      // Whisper transcription interval (send audio every N seconds)
+      const WHISPER_CHUNK_DURATION = 5000; // 5 seconds
+      let whisperInterval = null;
 
       // Chat persistence and deduplication
       const CHAT_HISTORY_KEY = 'opencluely_chat_history_v1';
@@ -793,8 +804,13 @@
       }
 
       function applyMicVisibility() {
+        // Force mic button to always be visible for debugging
         if (micButton) {
-          micButton.style.display = speechAvailable ? '' : 'none';
+          micButton.style.display = '';
+          // Add text fallback if icon doesn't load
+          if (!micButton.querySelector('i')) {
+            micButton.textContent = 'MIC';
+          }
         }
       }
       
@@ -968,6 +984,206 @@
           interimOverlay.classList.add('active');
         } else {
           interimOverlay.classList.remove('active');
+        }
+      }
+
+      // Audio Recording Functions for Whisper API
+      async function startAudioRecording() {
+        try {
+          // Enumerate devices to find VoiceMeeter
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const audioDevices = devices.filter(device => device.kind === 'audioinput');
+
+          console.log('Available audio devices:', audioDevices.map(d => d.label));
+
+          // Try to find VoiceMeeter device (case insensitive)
+          const voiceMeeterDevice = audioDevices.find(device =>
+            device.label.toLowerCase().includes('voicemeeter') &&
+            device.label.toLowerCase().includes('out')
+          );
+
+          let audioConstraints = {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          };
+
+          if (voiceMeeterDevice) {
+            audioConstraints.deviceId = { exact: voiceMeeterDevice.deviceId };
+            console.log('Using VoiceMeeter device:', voiceMeeterDevice.label);
+          } else {
+            console.warn('VoiceMeeter device not found, using default microphone');
+          }
+
+          // Request microphone access
+          recordingStream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints
+          });
+
+          // Log the actual audio track being used
+          const audioTrack = recordingStream.getAudioTracks()[0];
+          if (audioTrack) {
+            const settings = audioTrack.getSettings();
+            console.log('Audio track settings:', settings);
+            console.log('Audio track label:', audioTrack.label);
+          }
+
+          // Try different audio formats for better Whisper compatibility
+          // Whisper prefers: mp3, mp4, mpeg, mpga, m4a, wav, webm
+          const preferredFormats = [
+            'audio/mp4',
+            'audio/mpeg',
+            'audio/webm;codecs=opus',
+            'audio/webm'
+          ];
+
+          let mimeType = 'audio/webm';  // fallback
+          let fileExtension = 'webm';
+
+          for (const format of preferredFormats) {
+            if (MediaRecorder.isTypeSupported(format)) {
+              mimeType = format;
+              if (format.includes('mp4')) fileExtension = 'mp4';
+              else if (format.includes('mpeg')) fileExtension = 'mp3';
+              else fileExtension = 'webm';
+              break;
+            }
+          }
+
+          console.log('Using MIME type:', mimeType, 'Extension:', fileExtension);
+
+          mediaRecorder = new MediaRecorder(recordingStream, {
+            mimeType: mimeType,
+            audioBitsPerSecond: 128000  // Higher bitrate for better quality
+          });
+
+          // Store file extension for later use
+          window.currentRecordingExtension = fileExtension;
+
+          audioChunks = [];
+
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              audioChunks.push(event.data);
+            }
+          };
+
+          mediaRecorder.onstop = async () => {
+            if (audioChunks.length > 0) {
+              await sendToWhisper();
+            }
+          };
+
+          mediaRecorder.start();
+          isRecordingAudio = true;
+          recordingStartTime = Date.now();
+
+          // Send audio chunks to Whisper every N seconds
+          whisperInterval = setInterval(async () => {
+            if (isRecordingAudio && audioChunks.length > 0) {
+              // Stop and restart to get chunk
+              mediaRecorder.stop();
+              await new Promise(resolve => setTimeout(resolve, 100));
+              if (isRecordingAudio) {
+                audioChunks = [];
+                mediaRecorder.start();
+              }
+            }
+          }, WHISPER_CHUNK_DURATION);
+
+          console.log('Audio recording started');
+          handleRecordingStarted();
+
+          // Show which device is being used
+          const deviceMessage = voiceMeeterDevice
+            ? `Recording from: ${voiceMeeterDevice.label}`
+            : 'Recording from: Default Microphone (VoiceMeeter not found!)';
+          addMessage(deviceMessage, 'system');
+          addMessage('Recording audio from microphone and system...', 'system');
+          return true;
+
+        } catch (error) {
+          console.error('Failed to start audio recording:', error);
+          addMessage('Microphone access denied. Please allow microphone access.', 'error');
+          return false;
+        }
+      }
+
+      async function stopAudioRecording() {
+        isRecordingAudio = false;
+
+        if (whisperInterval) {
+          clearInterval(whisperInterval);
+          whisperInterval = null;
+        }
+
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          mediaRecorder.stop();
+        }
+
+        if (recordingStream) {
+          recordingStream.getTracks().forEach(track => track.stop());
+          recordingStream = null;
+        }
+
+        handleRecordingStopped();
+        addMessage('Stopped recording', 'system');
+        console.log('Audio recording stopped');
+      }
+
+      async function sendToWhisper() {
+        if (audioChunks.length === 0) {
+          console.log('No audio chunks to send');
+          return;
+        }
+
+        try {
+          // Use the same mime type that was used for recording
+          const recordingMimeType = mediaRecorder?.mimeType || 'audio/webm';
+          const audioBlob = new Blob(audioChunks, { type: recordingMimeType });
+          console.log(`Sending ${audioBlob.size} bytes (${audioChunks.length} chunks) to Whisper`);
+          addMessage(`Audio size: ${(audioBlob.size / 1024).toFixed(2)} KB`, 'system');
+
+          // Create a download link for debugging
+          const url = URL.createObjectURL(audioBlob);
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = url;
+          const ext = window.currentRecordingExtension || 'webm';
+          a.download = `recording_${Date.now()}.${ext}`;
+          document.body.appendChild(a);
+          console.log('Audio file available for download - click to save:', a);
+          console.log('Download URL (copy and open in browser to listen):', url);
+          console.log('File format:', recordingMimeType, 'Extension:', ext);
+
+          console.log('Sending audio to Whisper API...', {
+            size: audioBlob.size,
+            chunks: audioChunks.length
+          });
+
+          // Send to backend to handle Whisper API call
+          const result = await window.electronAPI.transcribeAudioWithWhisper(audioBlob);
+
+          if (result && result.text && result.text.trim()) {
+            console.log('Whisper transcription:', result.text);
+
+            // Add transcription to chat with speaker label
+            const labeledText = `[Audio] ${result.text.trim()}`;
+            addMessage(labeledText, 'user');
+
+            // Send to Gemini for response
+            setTimeout(async () => {
+              try {
+                await window.electronAPI.sendChatMessage(result.text.trim());
+              } catch (error) {
+                console.error('Failed to send transcription to LLM:', error);
+              }
+            }, 300);
+          }
+
+        } catch (error) {
+          console.error('Whisper API error:', error);
+          addMessage('Transcription failed: ' + error.message, 'error');
         }
       }
 
@@ -1199,6 +1415,56 @@
             renderAssistantResponse(data.response);
           }
         });
+
+        // Dual Speech Event Listeners
+        whysperAPI.onDualRecordingStarted(() => {
+          handleRecordingStarted();
+          addMessage('Dual audio capture started - listening to both microphone and system audio', 'system');
+        });
+
+        whysperAPI.onDualRecordingStopped(() => {
+          handleRecordingStopped();
+          addMessage('Dual audio capture stopped', 'system');
+        });
+
+        whysperAPI.onDualTranscriptionReceived((event, data) => {
+          if (data && data.text && data.isFinal) {
+            const speaker = data.speaker || (data.source === 'user' ? 'You' : 'Other Person');
+            const labeledText = `[${speaker}] ${data.text}`;
+
+            // Add message with speaker label
+            addMessage(labeledText, data.source === 'user' ? 'user' : 'other');
+
+            // Send to Gemini for response
+            setTimeout(async () => {
+              try {
+                await window.electronAPI.sendChatMessage(data.text.trim());
+              } catch (error) {
+                console.error('Failed to send transcription to LLM:', error);
+              }
+            }, 300);
+          }
+        });
+
+        whysperAPI.onDualInterimTranscription((event, data) => {
+          if (data && data.text) {
+            const speaker = data.speaker || (data.source === 'user' ? 'You' : 'Other Person');
+            showInterimText(`[${speaker}] ${data.text}`);
+          }
+        });
+
+        whysperAPI.onDualSpeechStatus((event, data) => {
+          if (data && data.status) {
+            addMessage(data.status, 'system');
+          }
+        });
+
+        whysperAPI.onDualSpeechError((event, data) => {
+          if (data && data.error) {
+            addMessage(`Dual speech error: ${data.error}`, 'error');
+            handleRecordingStopped();
+          }
+        });
       }
 
       // UI Event Listeners
@@ -1207,28 +1473,35 @@
       }
 
       if (micButton) {
-        micButton.addEventListener('click', async () => {
+        micButton.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          console.log('MIC button clicked, isRecordingAudio:', isRecordingAudio);
+
           if (!isInteractive) {
             addMessage('Window is in non-interactive mode. Press Alt+A to enable interaction.', 'error');
             return;
           }
-          if (!speechAvailable) {
-            addMessage('Speech recognition is not configured.', 'system');
-            return;
-          }
 
           try {
-            if (isRecording) {
-              if (whysperAPI) {
-                const result = await whysperAPI.stopSpeechRecognition();
-              }
+            if (isRecordingAudio) {
+              console.log('Stopping Azure Speech recording...');
+              await window.electronAPI.stopDualSpeechRecognition();
+              isRecordingAudio = false;
+              handleRecordingStopped();
             } else {
-              if (whysperAPI) {
-                const result = await whysperAPI.startSpeechRecognition();
-              }
+              console.log('Starting Azure Speech recording...');
+              await window.electronAPI.startDualSpeechRecognition();
+              isRecordingAudio = true;
+              handleRecordingStarted();
+              addMessage('Recording audio from microphone and system via Azure Speech...', 'system');
             }
           } catch (error) {
-            addMessage("Error in recognizing speech", 'error');
+            console.error('Audio recording error:', error);
+            addMessage("Recording error: " + (error.message || error), 'error');
+            isRecordingAudio = false;
+            handleRecordingStopped();
           }
         });
       }
